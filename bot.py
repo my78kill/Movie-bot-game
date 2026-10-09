@@ -253,27 +253,32 @@ class GameManager:
 
         low = text.lower()
 
-        # commands
-        if low.startswith("/start") or low.startswith("/help"):
+        # parse command: "/startgame@BotName" -> "/startgame"
+        if text.startswith("/"):
+            cmd = low.split()[0].split("@")[0]
+        else:
+            cmd = None
+
+        if cmd in ("/start", "/help"):
             self.cmd_welcome(chat_id)
-        elif low.startswith("/game"):
+        elif cmd == "/game":
             self.cmd_game(chat_id, uid, name, username, low)
-        elif low.startswith("/join"):
+        elif cmd == "/join":
             self.do_join(chat_id, uid, name, username)
-        elif low.startswith("/startgame"):
+        elif cmd == "/startgame":
             self.do_startgame(chat_id, uid)
-        elif low.startswith("/stop"):
+        elif cmd == "/stop":
             self.do_stop(chat_id, uid, name)
-        elif low.startswith("/leave"):
+        elif cmd == "/leave":
             self.do_leave(chat_id, uid)
-        elif low.startswith("/result"):
+        elif cmd == "/result":
             self.do_result(chat_id)
         else:
             # genre selection or movie answer
             if self.handle_genre_choice(chat_id, uid, name, username, low):
                 return
             g = self.games.get(chat_id)
-            if g and g.started and text:
+            if g and g.started and text and not text.startswith("/"):
                 g.submit(uid, text)
 
     def cmd_welcome(self, chat_id):
@@ -285,11 +290,12 @@ class GameManager:
             api("sendMessage", chat_id=chat_id,
                 text="⚠️ A game is already running. Send /stop to end it first.")
             return
-        # direct: /game bollywood
         parts = low.split()
-        if len(parts) > 1 and parts[1] in GENRES:
-            self.create_lobby(chat_id, uid, name, username, parts[1])
-            return
+        if len(parts) > 1:
+            arg = parts[1].split("@")[0]
+            if arg in GENRES:
+                self.create_lobby(chat_id, uid, name, username, arg)
+                return
         self.pending_genre[chat_id] = uid
         api("sendMessage", chat_id=chat_id,
             text="🎬 Which genre? Type <b>bollywood</b> or <b>hollywood</b>.",
