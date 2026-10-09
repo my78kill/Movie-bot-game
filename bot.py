@@ -17,7 +17,7 @@ WELCOME = (
     "1. /game — choose a genre\n"
     "2. /join — join the lobby\n"
     "3. Host sends /startgame to begin\n"
-    "4. The bot gives a letter, you send a movie starting with it\n"
+    "4. The bot gives a letter, the mentioned player sends a movie\n"
     "5. 35 seconds per turn, no repeated movies\n\n"
     "<b>Commands:</b>\n"
     "/game — create a new game\n"
@@ -77,6 +77,7 @@ class Game:
         self.used = set()
         self.letter = None
         self.turn_index = 0
+        self.turn_id = 0
         self.timer = None
         self.lock = threading.RLock()
 
@@ -134,7 +135,6 @@ class Game:
         self.order = list(self.players.keys())
         random.shuffle(self.order)
         self.turn_index = 0
-        self.letter = self.pick_letter()
         self.send(f"🎬 <b>Game started!</b> Genre: {GENRES[self.genre]}\n"
                   f"Host sends /stop to end the game.")
         self.begin_turn()
@@ -144,17 +144,23 @@ class Game:
             self.timer.cancel()
             self.timer = None
 
+    def current_uid(self):
+        return self.order[self.turn_index]
+
     def begin_turn(self):
         with self.lock:
             self._clear_timer()
-            uid = self.order[self.turn_index]
+            self.turn_id += 1
+            tid = self.turn_id
+            uid = self.current_uid()
+            self.letter = self.pick_letter()
             who = mention(uid, self.players[uid])
             self.send(
                 f"🎯 {who}, send a movie name starting with letter "
                 f"<b>{self.letter.upper()}</b>\n"
                 f"⏳ {TURN_SECONDS} seconds."
             )
-            self.timer = threading.Timer(TURN_SECONDS, self.timeout)
+            self.timer = threading.Timer(TURN_SECONDS, self._on_timeout, args=(tid,))
             self.timer.daemon = True
             self.timer.start()
 
@@ -162,52 +168,60 @@ class Game:
         self.turn_index = (self.turn_index + 1) % len(self.order)
 
     def submit(self, uid, text):
+        """Only the current player's message is handled. Others are ignored."""
         if not self.started or not self.order:
             return False
         with self.lock:
-            if uid != self.order[self.turn_index]:
+            # ignore anyone who is not the current player
+            if uid != self.current_uid():
                 return False
+
             movie = text.strip().lower()
             if not movie:
                 return False
-            who = mention(uid, self.players[uid])
 
+            # --- current player sent something: validate ---
             if not movie.startswith(self.letter):
-                return self._wrong(
+                self.send(
                     f"❌ '<b>{html.escape(text)}</b>' does not start with "
                     f"<b>{self.letter.upper()}</b>."
                 )
+                self._advance()
+                self.begin_turn()
+                return True
+
             if movie not in self.movie_set():
-                return self._wrong(
+                self.send(
                     f"❌ '<b>{html.escape(text)}</b>' is not in the movie list."
                 )
+                self._advance()
+                self.begin_turn()
+                return True
+
             if movie in self.used:
-                return self._wrong(
+                self.send(
                     f"❌ '<b>{html.escape(text)}</b>' was already used."
                 )
+                self._advance()
+                self.begin_turn()
+                return True
 
+            # --- correct ---
             self._clear_timer()
             self.used.add(movie)
             self.players[uid]["score"] += 1
+            who = mention(uid, self.players[uid])
             self.send(f"✅ <b>{html.escape(text)}</b> correct! +1 point to {who}")
-
-            self.letter = self.pick_letter()
             self._advance()
             self.begin_turn()
             return True
 
-    def _wrong(self, reason):
-        self._clear_timer()
-        self.send(reason)
-        self._advance()
-        self.begin_turn()
-        return True
-
-    def timeout(self):
+    def _on_timeout(self, tid):
+        """Fired by the turn timer. Ignores stale timers from older turns."""
         with self.lock:
-            if not self.started or not self.order:
+            if not self.started or not self.order or tid != self.turn_id:
                 return
-            uid = self.order[self.turn_index]
+            uid = self.current_uid()
             who = mention(uid, self.players[uid])
             self.send(f"⏰ Time out! {who} did not answer.")
             self._advance()
@@ -216,6 +230,7 @@ class Game:
     def stop(self, by_name):
         self._clear_timer()
         self.started = False
+        self.turn_id += 1  # invalidate any pending timer
         self.send(f"⛔ Game stopped by <b>{html.escape(by_name)}</b>.")
         self.show_result()
 
@@ -274,11 +289,11 @@ class GameManager:
         elif cmd == "/result":
             self.do_result(chat_id)
         else:
-            # genre selection or movie answer
+            # only for genre picking or a movie answer (game running)
             if self.handle_genre_choice(chat_id, uid, name, username, low):
                 return
             g = self.games.get(chat_id)
-            if g and g.started and text and not text.startswith("/"):
+            if g and g.started and text:
                 g.submit(uid, text)
 
     def cmd_welcome(self, chat_id):
