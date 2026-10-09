@@ -10,8 +10,6 @@ import config
 API = f"https://api.telegram.org/bot{config.BOT_TOKEN}"
 TURN_SECONDS = config.TURN_SECONDS
 
-ALPHABET = list("abcdefghijklmnopqrstuvwxyz")
-
 
 def api(method, **payload):
     try:
@@ -37,6 +35,24 @@ def load_movies(filename):
 
 BOLLYWOOD = load_movies("bollywood.txt")
 HOLLYWOOD = load_movies("hollywood.txt")
+
+WELCOME = (
+    "🎬 <b>Welcome to Movie Chain Bot!</b>\n\n"
+    "Yahan Bollywood aur Hollywood movie chain game khel sakte ho.\n\n"
+    "<b>Kaise khelein:</b>\n"
+    "1️⃣ /game — genre choose karo (Bollywood / Hollywood)\n"
+    "2️⃣ /join — game join karo\n"
+    "3️⃣ Host /startgame se game shuru karega\n"
+    "4️⃣ Bot jo letter dega, us letter se movie ka naam bhejo\n"
+    "5️⃣ ⏳ 35 sec per turn, repeat naam allowed nahi\n\n"
+    "<b>Commands:</b>\n"
+    "/game — naya game banao\n"
+    "/join — lobby join karo\n"
+    "/startgame — host game shuru kare\n"
+    "/leave — game se nikal jao\n"
+    "/stop — host game band kare\n"
+    "/result — scoreboard dekho"
+)
 
 
 class Game:
@@ -76,20 +92,23 @@ class Game:
 
     def lobby_keyboard(self):
         return [
-            [{"text": "➕ Join Game", "callback_data": "join"},
-             {"text": "🚪 Leave", "callback_data": "leave"}],
-            [{"text": "▶️ Start Game", "callback_data": "startgame"},
-             {"text": "⛔ Stop Game", "callback_data": "stop"}],
+            [{"text": "➕ Join (/join)", "callback_data": "join"},
+             {"text": "🚪 Leave (/leave)", "callback_data": "leave"}],
+            [{"text": "▶️ Start (/startgame)", "callback_data": "startgame"},
+             {"text": "⛔ Stop (/stop)", "callback_data": "stop"}],
         ]
 
     # ---------- lobby ----------
     def show_lobby(self):
-        names = "\n".join(f"• {html.escape(p['name'])}" for p in self.players.values())
+        names = "\n".join(
+            f"{i + 1}. {html.escape(p['name'])}" for i, p in enumerate(self.players.values())
+        )
         text = (
             f"🎬 <b>Movie Chain — {self.genre.title()}</b>\n\n"
             f"👑 Host: {html.escape(self.players[self.host_id]['name'])}\n\n"
-            f"👥 Players ({len(self.players)}):\n{names}\n\n"
-            f"Join karo, phir Host <b>Start Game</b> dabaye.\n"
+            f"👥 <b>Joined Players ({len(self.players)}):</b>\n{names}\n\n"
+            f"Join karne ke liye <b>/join</b> bhejo.\n"
+            f"Host <b>/startgame</b> bhejega to game shuru hoga.\n"
             f"<i>Rules: bot jo letter dega us letter se movie banao, "
             f"{TURN_SECONDS} sec per turn, repeat naam allowed nahi.</i>"
         )
@@ -127,7 +146,7 @@ class Game:
         if self.lobby_msg_id:
             api("editMessageText", chat_id=self.chat_id, message_id=self.lobby_msg_id,
                 text=f"🎬 <b>Game started!</b> Genre: {self.genre.title()}\n"
-                     f"End karne ke liye host /stop dabaye.",
+                     f"End karne ke liye host /stop bheje.",
                 parse_mode="HTML")
         self.begin_turn()
 
@@ -238,14 +257,22 @@ class GameManager:
 
     # ---------- messages ----------
     def on_message(self, msg):
-        chat_id = msg["chat"]["id"]
+        chat = msg["chat"]
+        chat_id = chat["id"]
         text = msg.get("text", "")
         user = msg.get("from", {})
         uid = user.get("id")
         name = user.get("first_name", "Player")
+        is_private = chat.get("type") == "private"
 
         if text.startswith("/start") or text.startswith("/help"):
-            self.cmd_start(chat_id, uid, name)
+            self.cmd_welcome(chat_id, name)
+        elif text.startswith("/game"):
+            self.cmd_game(chat_id, uid, name)
+        elif text.startswith("/join"):
+            self.do_join(chat_id, uid, name)
+        elif text.startswith("/startgame"):
+            self.do_startgame(chat_id, uid)
         elif text.startswith("/stop"):
             g = self.games.get(chat_id)
             if g and uid == g.host_id:
@@ -254,18 +281,25 @@ class GameManager:
             elif g:
                 api("sendMessage", chat_id=chat_id,
                     text="Sirf host game stop kar sakta hai.")
+            else:
+                api("sendMessage", chat_id=chat_id, text="Koi game nahi chal raha.")
         elif text.startswith("/leave"):
             self.do_leave(chat_id, uid)
         elif text.startswith("/result"):
             g = self.games.get(chat_id)
             if g:
                 g.show_result()
+            else:
+                api("sendMessage", chat_id=chat_id, text="Koi game nahi chal raha.")
         else:
             g = self.games.get(chat_id)
             if g and g.started and text and not text.startswith("/"):
                 g.submit(uid, text)
 
-    def cmd_start(self, chat_id, uid, name):
+    def cmd_welcome(self, chat_id, name):
+        api("sendMessage", chat_id=chat_id, text=WELCOME, parse_mode="HTML")
+
+    def cmd_game(self, chat_id, uid, name):
         g = self.games.get(chat_id)
         if g and g.started:
             api("sendMessage", chat_id=chat_id,
@@ -276,13 +310,45 @@ class GameManager:
             {"text": "🎥 Hollywood", "callback_data": "genre:hollywood"},
         ]]
         api("sendMessage", chat_id=chat_id,
-            text=f"🎬 <b>Movie Chain Game</b>\n\nHi {html.escape(name)}! Genre choose karo:",
+            text=f"🎬 <b>Movie Chain Game</b>\n\n{html.escape(name)}, genre choose karo:",
             parse_mode="HTML",
             reply_markup={"inline_keyboard": keyboard})
+
+    def do_join(self, chat_id, uid, name):
+        g = self.games.get(chat_id)
+        if not g:
+            api("sendMessage", chat_id=chat_id,
+                text="Pehle /game se genre choose karo.")
+            return
+        if g.started:
+            api("sendMessage", chat_id=chat_id,
+                text="Game already start ho gaya, ab join nahi ho sakte.")
+            return
+        if uid in g.players:
+            api("sendMessage", chat_id=chat_id, text="Tum already joined ho.")
+            return
+        g.players[uid] = {"name": name, "score": 0}
+        api("sendMessage", chat_id=chat_id, text=f"✅ {html.escape(name)} join ho gaya!")
+        g.show_lobby()
+
+    def do_startgame(self, chat_id, uid):
+        g = self.games.get(chat_id)
+        if not g:
+            api("sendMessage", chat_id=chat_id, text="Pehle /game se shuru karo.")
+            return
+        if uid != g.host_id:
+            api("sendMessage", chat_id=chat_id,
+                text="Sirf host /startgame kar sakta hai.")
+            return
+        if g.started:
+            api("sendMessage", chat_id=chat_id, text="Game already start ho chuka hai.")
+            return
+        g.start_game()
 
     def do_leave(self, chat_id, uid):
         g = self.games.get(chat_id)
         if not g:
+            api("sendMessage", chat_id=chat_id, text="Koi game nahi chal raha.")
             return
         if uid not in g.players:
             api("sendMessage", chat_id=chat_id, text="Tum joined nahi ho.")
@@ -298,7 +364,7 @@ class GameManager:
             text=f"🚪 {html.escape(name)} game se leave kar gaya.")
         g.show_lobby()
 
-    # ---------- callbacks ----------
+    # ---------- callbacks (buttons optional) ----------
     def on_callback(self, cq):
         data = cq["data"]
         chat_id = cq["message"]["chat"]["id"]
@@ -324,7 +390,7 @@ class GameManager:
 
         g = self.games.get(chat_id)
         if not g:
-            answer("Pehle /start karo")
+            answer("Pehle /game karo")
             return
 
         if data == "join":
@@ -367,7 +433,6 @@ manager = GameManager()
 
 # ---------- polling ----------
 def run_bot():
-    # webhook band karo taaki polling chale
     api("deleteWebhook", drop_pending_updates=False)
     offset = None
     print("Bot polling started...")
